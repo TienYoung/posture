@@ -22,6 +22,12 @@
 /* Includes ------------------------------------------------------------------*/
 
 #include "app_azure_rtos.h"
+#include "app_azure_rtos_config.h"
+#include "main.h"
+#include "stm32f3xx_hal.h"
+#include "stm32f3xx_hal_gpio.h"
+#include "tx_api.h"
+#include "tx_port.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -45,17 +51,17 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN TX_Pool_Buffer */
-/* USER CODE END TX_Pool_Buffer */
 static UCHAR tx_byte_pool_buffer[TX_APP_MEM_POOL_SIZE];
 static TX_BYTE_POOL tx_app_byte_pool;
+/* USER CODE END TX_Pool_Buffer */
 
-/* USER CODE BEGIN PV */
-
-/* USER CODE END PV */
+/* USER CODE BEGIN thread_0 */
+TX_THREAD thread_0;
+/* USER CODE END thread_0 */
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN PFP */
-
+VOID blink_thread(ULONG thread_input);
 /* USER CODE END PFP */
 
 /**
@@ -70,6 +76,7 @@ VOID tx_application_define(VOID *first_unused_memory)
   /* USER CODE END  tx_application_define */
 
   VOID *memory_ptr;
+  CHAR *thread_ptr = TX_NULL;
 
   if (tx_byte_pool_create(&tx_app_byte_pool, "Tx App memory pool", tx_byte_pool_buffer, TX_APP_MEM_POOL_SIZE) != TX_SUCCESS)
   {
@@ -93,6 +100,15 @@ VOID tx_application_define(VOID *first_unused_memory)
     }
 
     /* USER CODE BEGIN  App_ThreadX_Init_Success */
+    UINT result = tx_byte_allocate(&tx_app_byte_pool, (VOID **) &thread_ptr, TX_APP_STACK_SIZE, TX_NO_WAIT);
+    if(result == TX_SUCCESS)
+    {
+      result = tx_thread_create(&thread_0, "blink thread", blink_thread, 0, thread_ptr, TX_APP_STACK_SIZE, 1, 1, TX_NO_TIME_SLICE, TX_AUTO_START);
+      if(result == TX_SUCCESS)
+      {
+
+      }
+    }
 
     /* USER CODE END  App_ThreadX_Init_Success */
 
@@ -101,5 +117,11 @@ VOID tx_application_define(VOID *first_unused_memory)
 }
 
 /* USER CODE BEGIN  0 */
-
+VOID blink_thread(ULONG thread_input)
+{
+  while (1) {
+    HAL_GPIO_TogglePin(LD3_GPIO_Port, LD3_Pin);
+    tx_thread_sleep(50);
+  }
+}
 /* USER CODE END  0 */

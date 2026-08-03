@@ -29,6 +29,7 @@ set(MX_Application_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/app_threadx.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/stm32f3xx_it.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/stm32f3xx_hal_msp.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/stm32f3xx_hal_timebase_tim.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/sysmem.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/syscalls.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../startup_stm32f303xc.s
@@ -38,6 +39,8 @@ set(MX_Application_Src
 set(STM32_Drivers_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/system_stm32f3xx.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Drivers/STM32F3xx_HAL_Driver/Src/stm32f3xx_ll_usb.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Drivers/STM32F3xx_HAL_Driver/Src/stm32f3xx_hal_tim.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../Drivers/STM32F3xx_HAL_Driver/Src/stm32f3xx_hal_tim_ex.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Drivers/STM32F3xx_HAL_Driver/Src/stm32f3xx_hal_i2c.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Drivers/STM32F3xx_HAL_Driver/Src/stm32f3xx_hal_i2c_ex.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Drivers/STM32F3xx_HAL_Driver/Src/stm32f3xx_hal.c
@@ -235,7 +238,7 @@ set(MX_LINK_LIBS
     STM32_Drivers
     ${TOOLCHAIN_LINK_LIBRARIES}
     ThreadX
-	
+    
 )
 # Interface library for includes and symbols
 add_library(stm32cubemx INTERFACE)
