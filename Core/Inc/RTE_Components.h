@@ -22,7 +22,7 @@
 #define  __RTE_COMPONENTS_H__
 
 /* Defines ------------------------------------------------------------------*/
-/* STMicroelectronics.X-CUBE-AZRTOS-F4.1.1.0 */
-#define THREADX_ENABLED
+/* STMicroelectronics.X-CUBE-MEMS1.13.0.0 */
+#define LSM303AGR_ACCMAG_I2C
 
 #endif /* __RTE_COMPONENTS_H__ */
