@@ -98,11 +98,10 @@ int main(void)
   MX_I2C1_Init();
   MX_SPI1_Init();
   MX_USB_PCD_Init();
-  /* USER CODE BEGIN 2 */
-
-  /* USER CODE END 2 */
-
+  /* USER CODE BEGIN ThreadX */
   MX_ThreadX_Init();
+  /* USER CODE END ThreadX */
+
 
   /* We should never get here as control is now taken by the scheduler */
 
