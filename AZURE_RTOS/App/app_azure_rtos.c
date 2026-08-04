@@ -32,7 +32,6 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "custom_motion_sensors.h"
-#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -54,15 +53,8 @@
 #define LEVEL_EXIT_RATIO_PER_1000    70L
 #define LEVEL_MIN_VERTICAL_MG        700L
 #define LEVEL_MAX_VERTICAL_MG        1300L
+#define LEVEL_DIAGONAL_RATIO_PER_1000 414L
 #define LEVEL_ANIMATION_SAMPLES      10U
-
-#define LEVEL_PI_RAD                 3.14159265358979323846f
-#define LEVEL_FULL_CIRCLE_RAD        (2.0f * LEVEL_PI_RAD)
-#define LEVEL_DIRECTION_SECTOR_RAD   (LEVEL_PI_RAD / 4.0f)
-#define LEVEL_DIRECTION_HALF_RAD     (LEVEL_DIRECTION_SECTOR_RAD / 2.0f)
-#define LEVEL_ONE_LED_MAX_ERROR_RAD  (LEVEL_PI_RAD / 24.0f) /* 7.5 degrees */
-#define LEVEL_THREE_LED_MAX_ERROR_RAD (LEVEL_PI_RAD / 12.0f) /* 15 degrees */
-#define LEVEL_DIRECTION_COUNT        8U
 
 #define LEVEL_RED_LEDS               (LD3_Pin | LD10_Pin)
 #define LEVEL_ALL_LEDS               (LD3_Pin | LD4_Pin | LD5_Pin | LD6_Pin | \
@@ -93,7 +85,7 @@ static int32_t LevelSensor_Init(void);
 static int32_t LevelSensor_Read(int32_t acceleration_mg[3]);
 static void LevelLeds_Set(uint16_t leds);
 static uint8_t LevelDetector_Update(const int32_t acceleration_mg[3], uint8_t was_level);
-static uint16_t LevelDirection_GetLedMask(void);
+static uint16_t LevelDirection_GetLed(void);
 VOID level_thread(ULONG thread_input);
 /* USER CODE END PFP */
 
@@ -246,65 +238,30 @@ static uint8_t LevelDetector_Update(const int32_t acceleration_mg[3], uint8_t wa
           ((abs_y * 1000L) <= (abs_z * threshold_ratio))) ? 1U : 0U;
 }
 
-static uint16_t LevelDirection_GetLedMask(void)
+static uint16_t LevelDirection_GetLed(void)
 {
-  static const uint16_t direction_led[LEVEL_DIRECTION_COUNT] =
-  {
-    LD3_Pin, LD5_Pin, LD7_Pin, LD9_Pin,
-    LD10_Pin, LD8_Pin, LD6_Pin, LD4_Pin
-  };
-  float direction_rad;
-  float center_rad;
-  float error_rad;
-  uint32_t direction_index;
-  int32_t half_width;
-  int32_t offset;
-  uint16_t led_mask = 0U;
+  int32_t x = filtered_acc_mg[0];
+  int32_t y = filtered_acc_mg[1];
+  int32_t abs_x = (x < 0L) ? -x : x;
+  int32_t abs_y = (y < 0L) ? -y : y;
 
-  /* Angle starts at North and increases clockwise around the LED ring. */
-  direction_rad = atan2f((float)filtered_acc_mg[0],
-                         (float)-filtered_acc_mg[1]);
-  if (direction_rad < 0.0f)
+  /* Split the X/Y gravity projection into eight 45-degree sectors. */
+  if ((abs_x * 1000L) <= (abs_y * LEVEL_DIAGONAL_RATIO_PER_1000))
   {
-    direction_rad += LEVEL_FULL_CIRCLE_RAD;
+    return (y < 0L) ? LD3_Pin : LD10_Pin;  /* North / South */
   }
 
-  direction_index = (uint32_t)((direction_rad + LEVEL_DIRECTION_HALF_RAD) /
-                               LEVEL_DIRECTION_SECTOR_RAD);
-  if (direction_index >= LEVEL_DIRECTION_COUNT)
+  if ((abs_y * 1000L) <= (abs_x * LEVEL_DIAGONAL_RATIO_PER_1000))
   {
-    direction_index = 0U;
+    return (x > 0L) ? LD7_Pin : LD6_Pin;   /* East / West */
   }
 
-  center_rad = (float)direction_index * LEVEL_DIRECTION_SECTOR_RAD;
-  error_rad = fabsf(direction_rad - center_rad);
-  if (error_rad > LEVEL_PI_RAD)
+  if (x > 0L)
   {
-    error_rad = LEVEL_FULL_CIRCLE_RAD - error_rad;
+    return (y < 0L) ? LD5_Pin : LD9_Pin;   /* North-East / South-East */
   }
 
-  if (error_rad <= LEVEL_ONE_LED_MAX_ERROR_RAD)
-  {
-    half_width = 0;
-  }
-  else if (error_rad <= LEVEL_THREE_LED_MAX_ERROR_RAD)
-  {
-    half_width = 1;
-  }
-  else
-  {
-    half_width = 2;
-  }
-
-  for (offset = -half_width; offset <= half_width; offset++)
-  {
-    uint32_t led_index = (uint32_t)((int32_t)direction_index + offset +
-                                    (int32_t)LEVEL_DIRECTION_COUNT) %
-                         LEVEL_DIRECTION_COUNT;
-    led_mask |= direction_led[led_index];
-  }
-
-  return led_mask;
+  return (y < 0L) ? LD4_Pin : LD8_Pin;     /* North-West / South-West */
 }
 
 VOID level_thread(ULONG thread_input)
@@ -347,7 +304,7 @@ VOID level_thread(ULONG thread_input)
       {
         level_animation_samples = 0U;
         level_animation_on = 1U;
-        LevelLeds_Set(LevelDirection_GetLedMask());
+        LevelLeds_Set(LevelDirection_GetLed());
       }
     }
     else
