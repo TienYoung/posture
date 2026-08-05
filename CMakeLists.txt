@@ -38,7 +38,7 @@ add_executable(${CMAKE_PROJECT_NAME})
 add_subdirectory(cmake/stm32cubemx)
 
 # Add the application-managed ThreadX kernel and integration.
-include(cmake/threadx.cmake)
+include(cmake/azure-rtos.cmake)
 
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
