@@ -32,6 +32,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "custom_motion_sensors.h"
+#include <stddef.h>
+#include "motion_fx.h"
 #include <stdio.h>
 /* USER CODE END Includes */
 
@@ -42,14 +44,36 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define LEVEL_SAMPLE_TICKS           (TX_TIMER_TICKS_PER_SECOND / 20U)
+#define FUSION_SAMPLE_HZ             100U
+#define FUSION_SAMPLE_PERIOD_MS      (1000U / FUSION_SAMPLE_HZ)
+#define FUSION_SAMPLE_TICKS          (TX_TIMER_TICKS_PER_SECOND / FUSION_SAMPLE_HZ)
+#define FUSION_UART_DECIMATION       5U
+#define FUSION_STATE_SIZE_BYTES      2432U
+#define FUSION_ACC_INSTANCE          CUSTOM_LSM303AGR_ACC_0
+#define FUSION_MAG_INSTANCE          CUSTOM_LSM303AGR_MAG_0
+#define FUSION_GYRO_INSTANCE         CUSTOM_A3G4250D_0
+#define FUSION_SENSOR_ODR_HZ         100.0f
+#define FUSION_ACC_FULL_SCALE_G      2
+#define FUSION_GYRO_FULL_SCALE_DPS   245
+#define FUSION_MG_TO_G               0.001f
+#define FUSION_MDPS_TO_DPS           0.001f
+#define FUSION_MGAUSS_TO_UT50        0.002f
+#define FUSION_DEFAULT_DELTA_S       0.010f
+#define FUSION_MIN_DELTA_S           0.001f
+#define FUSION_MAX_DELTA_S           0.050f
+
+/* Raw positive axes expressed in the board frame: east, south and up. */
+#define FUSION_ACC_ORIENTATION       "esu"
+#define FUSION_GYRO_ORIENTATION      "esu"
+#define FUSION_MAG_ORIENTATION       "esu"
+
+#define FUSION_GBIAS_ACC_TH_SC       (2.0f * 0.000765f)
+#define FUSION_GBIAS_GYRO_TH_SC      (2.0f * 0.002000f)
+#define FUSION_GBIAS_MAG_TH_SC       (2.0f * 0.001500f)
+
 #define LEVEL_ERROR_BLINK_TICKS      (TX_TIMER_TICKS_PER_SECOND / 5U)
-#define LEVEL_SENSOR_INSTANCE        CUSTOM_LSM303AGR_ACC_0
-#define LEVEL_SENSOR_FUNCTION        MOTION_ACCELERO
-#define LEVEL_SENSOR_ODR_HZ          100.0f
-#define LEVEL_SENSOR_FULL_SCALE_G    2
 #define LEVEL_UART_TIMEOUT_MS        20U
-#define LEVEL_UART_BUFFER_SIZE       64U
+#define LEVEL_UART_BUFFER_SIZE       96U
 
 /* tan(3 degrees) ~= 0.052; tan(4 degrees) ~= 0.070. */
 #define LEVEL_ENTER_RATIO_PER_1000   52L
@@ -57,7 +81,7 @@
 #define LEVEL_MIN_VERTICAL_MG        700L
 #define LEVEL_MAX_VERTICAL_MG        1300L
 #define LEVEL_DIAGONAL_RATIO_PER_1000 414L
-#define LEVEL_ANIMATION_SAMPLES      10U
+#define LEVEL_ANIMATION_SAMPLES      50U
 
 #define LEVEL_RED_LEDS               (LD3_Pin | LD10_Pin)
 #define LEVEL_ALL_LEDS               (LD3_Pin | LD4_Pin | LD5_Pin | LD6_Pin | \
@@ -78,19 +102,25 @@ static TX_BYTE_POOL tx_app_byte_pool;
 
 /* USER CODE BEGIN PV */
 TX_THREAD thread_0;
-static int32_t filtered_acc_mg[3];
-static uint8_t filter_initialized;
+/* MotionFX contains double-word accesses, so its opaque state must be 8-byte aligned. */
+static uint64_t motionfx_state[(FUSION_STATE_SIZE_BYTES + sizeof(uint64_t) - 1U) / sizeof(uint64_t)];
+static MFX_MagCal_quality_t mag_cal_quality = MFX_MAGCALUNKNOWN;
 extern UART_HandleTypeDef huart1;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN PFP */
-static int32_t LevelSensor_Init(void);
-static int32_t LevelSensor_Read(int32_t acceleration_mg[3]);
-static void LevelUart_PrintAcceleration(const int32_t acceleration_mg[3]);
+static int32_t FusionSensors_Init(void);
+static int32_t FusionSensors_Read(MFX_input_t *input, uint32_t timestamp_ms);
+static int32_t FusionEngine_Init(void);
+static void FusionEngine_Run(MFX_input_t *input, MFX_output_t *output, float delta_time_s);
+static void FusionUart_PrintQuaternion(const MFX_output_t *output);
+static int32_t FusionFloatToMicro(float value);
 static void LevelLeds_Set(uint16_t leds);
-static uint8_t LevelDetector_Update(const int32_t acceleration_mg[3], uint8_t was_level);
-static uint16_t LevelDirection_GetLed(void);
+static uint8_t LevelDetector_Update(const float gravity[3], uint8_t was_level);
+static uint16_t LevelDirection_GetLed(const float gravity[3]);
+char MotionFX_LoadMagCalFromNVM(unsigned short int data_size, unsigned int *data);
+char MotionFX_SaveMagCalInNVM(unsigned short int data_size, unsigned int *data);
 VOID level_thread(ULONG thread_input);
 /* USER CODE END PFP */
 
@@ -147,66 +177,168 @@ VOID tx_application_define(VOID *first_unused_memory)
 }
 
 /* USER CODE BEGIN  0 */
-static int32_t LevelSensor_Init(void)
+static int32_t FusionSensors_Init(void)
 {
-  if (CUSTOM_MOTION_SENSOR_Init(LEVEL_SENSOR_INSTANCE,
-                                LEVEL_SENSOR_FUNCTION) != BSP_ERROR_NONE)
+  if ((CUSTOM_MOTION_SENSOR_Init(FUSION_ACC_INSTANCE, MOTION_ACCELERO) != BSP_ERROR_NONE) ||
+      (CUSTOM_MOTION_SENSOR_Init(FUSION_MAG_INSTANCE, MOTION_MAGNETO) != BSP_ERROR_NONE) ||
+      (CUSTOM_MOTION_SENSOR_Init(FUSION_GYRO_INSTANCE, MOTION_GYRO) != BSP_ERROR_NONE))
   {
     return BSP_ERROR_COMPONENT_FAILURE;
   }
 
-  if (CUSTOM_MOTION_SENSOR_SetOutputDataRate(LEVEL_SENSOR_INSTANCE,
-                                              LEVEL_SENSOR_FUNCTION,
-                                              LEVEL_SENSOR_ODR_HZ) != BSP_ERROR_NONE)
+  if ((CUSTOM_MOTION_SENSOR_SetOutputDataRate(FUSION_ACC_INSTANCE, MOTION_ACCELERO,
+                                               FUSION_SENSOR_ODR_HZ) != BSP_ERROR_NONE) ||
+      (CUSTOM_MOTION_SENSOR_SetOutputDataRate(FUSION_MAG_INSTANCE, MOTION_MAGNETO,
+                                               FUSION_SENSOR_ODR_HZ) != BSP_ERROR_NONE) ||
+      (CUSTOM_MOTION_SENSOR_SetOutputDataRate(FUSION_GYRO_INSTANCE, MOTION_GYRO,
+                                               FUSION_SENSOR_ODR_HZ) != BSP_ERROR_NONE))
   {
     return BSP_ERROR_COMPONENT_FAILURE;
   }
 
-  if (CUSTOM_MOTION_SENSOR_SetFullScale(LEVEL_SENSOR_INSTANCE,
-                                        LEVEL_SENSOR_FUNCTION,
-                                        LEVEL_SENSOR_FULL_SCALE_G) != BSP_ERROR_NONE)
+  if ((CUSTOM_MOTION_SENSOR_SetFullScale(FUSION_ACC_INSTANCE, MOTION_ACCELERO,
+                                          FUSION_ACC_FULL_SCALE_G) != BSP_ERROR_NONE) ||
+      (CUSTOM_MOTION_SENSOR_SetFullScale(FUSION_GYRO_INSTANCE, MOTION_GYRO,
+                                          FUSION_GYRO_FULL_SCALE_DPS) != BSP_ERROR_NONE))
   {
     return BSP_ERROR_COMPONENT_FAILURE;
   }
 
-  if (CUSTOM_MOTION_SENSOR_Enable(LEVEL_SENSOR_INSTANCE,
-                                   LEVEL_SENSOR_FUNCTION) != BSP_ERROR_NONE)
-  {
-    return BSP_ERROR_COMPONENT_FAILURE;
-  }
-
-  tx_thread_sleep(LEVEL_SAMPLE_TICKS);
+  tx_thread_sleep(FUSION_SAMPLE_TICKS);
   return BSP_ERROR_NONE;
 }
 
-static int32_t LevelSensor_Read(int32_t acceleration_mg[3])
+static int32_t FusionSensors_Read(MFX_input_t *input, uint32_t timestamp_ms)
 {
-  CUSTOM_MOTION_SENSOR_Axes_t axes;
+  CUSTOM_MOTION_SENSOR_Axes_t acc;
+  CUSTOM_MOTION_SENSOR_Axes_t gyro;
+  CUSTOM_MOTION_SENSOR_Axes_t mag;
+  MFX_MagCal_input_t mag_cal_input;
+  MFX_MagCal_output_t mag_cal_output;
+  uint32_t axis;
 
-  if (CUSTOM_MOTION_SENSOR_GetAxes(LEVEL_SENSOR_INSTANCE,
-                                   LEVEL_SENSOR_FUNCTION,
-                                   &axes) != BSP_ERROR_NONE)
+  if ((CUSTOM_MOTION_SENSOR_GetAxes(FUSION_ACC_INSTANCE, MOTION_ACCELERO, &acc) != BSP_ERROR_NONE) ||
+      (CUSTOM_MOTION_SENSOR_GetAxes(FUSION_GYRO_INSTANCE, MOTION_GYRO, &gyro) != BSP_ERROR_NONE) ||
+      (CUSTOM_MOTION_SENSOR_GetAxes(FUSION_MAG_INSTANCE, MOTION_MAGNETO, &mag) != BSP_ERROR_NONE))
   {
     return BSP_ERROR_COMPONENT_FAILURE;
   }
 
-  acceleration_mg[0] = axes.x;
-  acceleration_mg[1] = axes.y;
-  acceleration_mg[2] = axes.z;
+  input->acc[0] = (float)acc.x * FUSION_MG_TO_G;
+  input->acc[1] = (float)acc.y * FUSION_MG_TO_G;
+  input->acc[2] = (float)acc.z * FUSION_MG_TO_G;
+
+  input->gyro[0] = (float)gyro.x * FUSION_MDPS_TO_DPS;
+  input->gyro[1] = (float)gyro.y * FUSION_MDPS_TO_DPS;
+  input->gyro[2] = (float)gyro.z * FUSION_MDPS_TO_DPS;
+
+  mag_cal_input.mag[0] = (float)mag.x * FUSION_MGAUSS_TO_UT50;
+  mag_cal_input.mag[1] = (float)mag.y * FUSION_MGAUSS_TO_UT50;
+  mag_cal_input.mag[2] = (float)mag.z * FUSION_MGAUSS_TO_UT50;
+  mag_cal_input.time_stamp = (int)timestamp_ms;
+  MotionFX_MagCal_run(&mag_cal_input);
+  MotionFX_MagCal_getParams(&mag_cal_output);
+  mag_cal_quality = mag_cal_output.cal_quality;
+
+  for (axis = 0U; axis < MFX_NUM_AXES; axis++)
+  {
+    input->mag[axis] = mag_cal_input.mag[axis];
+    if (mag_cal_output.cal_quality >= MFX_MAGCALOK)
+    {
+      input->mag[axis] -= mag_cal_output.hi_bias[axis];
+    }
+  }
 
   return BSP_ERROR_NONE;
 }
 
-static void LevelUart_PrintAcceleration(const int32_t acceleration_mg[3])
+static int32_t FusionEngine_Init(void)
+{
+  MFX_knobs_t knobs;
+  uint32_t axis;
+  const char acc_orientation[] = FUSION_ACC_ORIENTATION;
+  const char gyro_orientation[] = FUSION_GYRO_ORIENTATION;
+  const char mag_orientation[] = FUSION_MAG_ORIENTATION;
+
+  if (MotionFX_GetStateSize() > sizeof(motionfx_state))
+  {
+    return BSP_ERROR_NO_INIT;
+  }
+
+  MotionFX_initialize((MFXState_t)motionfx_state);
+  MotionFX_getKnobs((MFXState_t)motionfx_state, &knobs);
+
+  for (axis = 0U; axis < MFX_NUM_AXES; axis++)
+  {
+    knobs.acc_orientation[axis] = acc_orientation[axis];
+    knobs.gyro_orientation[axis] = gyro_orientation[axis];
+    knobs.mag_orientation[axis] = mag_orientation[axis];
+  }
+  knobs.acc_orientation[MFX_NUM_AXES] = '\0';
+  knobs.gyro_orientation[MFX_NUM_AXES] = '\0';
+  knobs.mag_orientation[MFX_NUM_AXES] = '\0';
+  knobs.gbias_acc_th_sc = FUSION_GBIAS_ACC_TH_SC;
+  knobs.gbias_gyro_th_sc = FUSION_GBIAS_GYRO_TH_SC;
+  knobs.gbias_mag_th_sc = FUSION_GBIAS_MAG_TH_SC;
+  knobs.output_type = MFX_ENGINE_OUTPUT_ENU;
+  knobs.LMode = 1U;
+  knobs.modx = 1U;
+  knobs.start_automatic_gbias_calculation = 1;
+
+  MotionFX_setKnobs((MFXState_t)motionfx_state, &knobs);
+  MotionFX_enable_6X((MFXState_t)motionfx_state, MFX_ENGINE_DISABLE);
+  MotionFX_enable_9X((MFXState_t)motionfx_state, MFX_ENGINE_ENABLE);
+  MotionFX_MagCal_init((int)FUSION_SAMPLE_PERIOD_MS, 1U);
+
+  return BSP_ERROR_NONE;
+}
+
+static void FusionEngine_Run(MFX_input_t *input, MFX_output_t *output, float delta_time_s)
+{
+  MotionFX_propagate((MFXState_t)motionfx_state, output, input, &delta_time_s);
+  MotionFX_update((MFXState_t)motionfx_state, output, input, &delta_time_s, NULL);
+}
+
+static int32_t FusionFloatToMicro(float value)
+{
+  if (value != value)
+  {
+    return 0;
+  }
+  if (value > 2.0f)
+  {
+    value = 2.0f;
+  }
+  else if (value < -2.0f)
+  {
+    value = -2.0f;
+  }
+  return (int32_t)(value * 1000000.0f);
+}
+
+static void FusionUart_PrintQuaternion(const MFX_output_t *output)
 {
   char message[LEVEL_UART_BUFFER_SIZE];
+  int32_t scaled[MFX_QNUM_AXES];
+  uint32_t absolute[MFX_QNUM_AXES];
+  char sign[MFX_QNUM_AXES];
   int32_t length;
+  uint32_t axis;
+
+  for (axis = 0U; axis < MFX_QNUM_AXES; axis++)
+  {
+    scaled[axis] = FusionFloatToMicro(output->quaternion[axis]);
+    sign[axis] = (scaled[axis] < 0) ? '-' : '+';
+    absolute[axis] = (scaled[axis] < 0) ? (uint32_t)(-scaled[axis]) : (uint32_t)scaled[axis];
+  }
 
   length = snprintf(message, sizeof(message),
-                    "ACC X=%ld Y=%ld Z=%ld mg\r\n",
-                    (long)acceleration_mg[0],
-                    (long)acceleration_mg[1],
-                    (long)acceleration_mg[2]);
+                    "Q,%c%lu.%06lu,%c%lu.%06lu,%c%lu.%06lu,%c%lu.%06lu,M,%u\r\n",
+                    sign[0], (unsigned long)(absolute[0] / 1000000U), (unsigned long)(absolute[0] % 1000000U),
+                    sign[1], (unsigned long)(absolute[1] / 1000000U), (unsigned long)(absolute[1] % 1000000U),
+                    sign[2], (unsigned long)(absolute[2] / 1000000U), (unsigned long)(absolute[2] % 1000000U),
+                    sign[3], (unsigned long)(absolute[3] / 1000000U), (unsigned long)(absolute[3] % 1000000U),
+                    (unsigned int)mag_cal_quality);
 
   if (length > 0)
   {
@@ -224,83 +356,81 @@ static void LevelLeds_Set(uint16_t leds)
   HAL_GPIO_WritePin(GPIOE, leds, GPIO_PIN_SET);
 }
 
-static uint8_t LevelDetector_Update(const int32_t acceleration_mg[3], uint8_t was_level)
+static uint8_t LevelDetector_Update(const float gravity[3], uint8_t was_level)
 {
-  int32_t abs_x;
-  int32_t abs_y;
-  int32_t abs_z;
-  int32_t threshold_ratio;
-  uint32_t axis;
+  float abs_x = (gravity[0] < 0.0f) ? -gravity[0] : gravity[0];
+  float abs_y = (gravity[1] < 0.0f) ? -gravity[1] : gravity[1];
+  float abs_z = (gravity[2] < 0.0f) ? -gravity[2] : gravity[2];
+  float threshold_ratio;
 
-  if (filter_initialized == 0U)
-  {
-    for (axis = 0U; axis < 3U; axis++)
-    {
-      filtered_acc_mg[axis] = acceleration_mg[axis];
-    }
-    filter_initialized = 1U;
-  }
-  else
-  {
-    for (axis = 0U; axis < 3U; axis++)
-    {
-      filtered_acc_mg[axis] += (acceleration_mg[axis] - filtered_acc_mg[axis]) / 8L;
-    }
-  }
-
-  abs_x = (filtered_acc_mg[0] < 0L) ? -filtered_acc_mg[0] : filtered_acc_mg[0];
-  abs_y = (filtered_acc_mg[1] < 0L) ? -filtered_acc_mg[1] : filtered_acc_mg[1];
-  abs_z = (filtered_acc_mg[2] < 0L) ? -filtered_acc_mg[2] : filtered_acc_mg[2];
-
-  if ((abs_z < LEVEL_MIN_VERTICAL_MG) || (abs_z > LEVEL_MAX_VERTICAL_MG))
+  if ((abs_z < 0.7f) || (abs_z > 1.3f))
   {
     return 0U;
   }
 
-  threshold_ratio = (was_level != 0U) ? LEVEL_EXIT_RATIO_PER_1000
-                                      : LEVEL_ENTER_RATIO_PER_1000;
+  threshold_ratio = (was_level != 0U) ? ((float)LEVEL_EXIT_RATIO_PER_1000 / 1000.0f)
+                                      : ((float)LEVEL_ENTER_RATIO_PER_1000 / 1000.0f);
 
-  return (((abs_x * 1000L) <= (abs_z * threshold_ratio)) &&
-          ((abs_y * 1000L) <= (abs_z * threshold_ratio))) ? 1U : 0U;
+  return ((abs_x <= (abs_z * threshold_ratio)) &&
+          (abs_y <= (abs_z * threshold_ratio))) ? 1U : 0U;
 }
 
-static uint16_t LevelDirection_GetLed(void)
+static uint16_t LevelDirection_GetLed(const float gravity[3])
 {
-  int32_t x = filtered_acc_mg[0];
-  int32_t y = filtered_acc_mg[1];
-  int32_t abs_x = (x < 0L) ? -x : x;
-  int32_t abs_y = (y < 0L) ? -y : y;
+  /* The LED ring's east/west direction is opposite to the fusion board X axis. */
+  float x = -gravity[0];
+  float y = gravity[1];
+  float abs_x = (x < 0.0f) ? -x : x;
+  float abs_y = (y < 0.0f) ? -y : y;
 
-  /* Split the X/Y gravity projection into eight 45-degree sectors. */
-  if ((abs_x * 1000L) <= (abs_y * LEVEL_DIAGONAL_RATIO_PER_1000))
+  /* Split the fused gravity projection into eight 45-degree sectors. */
+  if ((abs_x * 1000.0f) <= (abs_y * (float)LEVEL_DIAGONAL_RATIO_PER_1000))
   {
-    return (y < 0L) ? LD3_Pin : LD10_Pin;  /* North / South */
+    return (y < 0.0f) ? LD3_Pin : LD10_Pin;  /* North / South */
   }
 
-  if ((abs_y * 1000L) <= (abs_x * LEVEL_DIAGONAL_RATIO_PER_1000))
+  if ((abs_y * 1000.0f) <= (abs_x * (float)LEVEL_DIAGONAL_RATIO_PER_1000))
   {
-    return (x > 0L) ? LD7_Pin : LD6_Pin;   /* East / West */
+    return (x > 0.0f) ? LD7_Pin : LD6_Pin;   /* East / West */
   }
 
-  if (x > 0L)
+  if (x > 0.0f)
   {
-    return (y < 0L) ? LD5_Pin : LD9_Pin;   /* North-East / South-East */
+    return (y < 0.0f) ? LD5_Pin : LD9_Pin;   /* North-East / South-East */
   }
 
-  return (y < 0L) ? LD4_Pin : LD8_Pin;     /* North-West / South-West */
+  return (y < 0.0f) ? LD4_Pin : LD8_Pin;     /* North-West / South-West */
+}
+
+char MotionFX_LoadMagCalFromNVM(unsigned short int data_size, unsigned int *data)
+{
+  (void)data_size;
+  (void)data;
+  return (char)1;
+}
+
+char MotionFX_SaveMagCalInNVM(unsigned short int data_size, unsigned int *data)
+{
+  (void)data_size;
+  (void)data;
+  return (char)1;
 }
 
 VOID level_thread(ULONG thread_input)
 {
-  int32_t acceleration_mg[3];
+  MFX_input_t fusion_input = {0};
+  MFX_output_t fusion_output = {0};
   uint8_t is_level = 0U;
   uint8_t level_animation_on = 1U;
   uint8_t level_animation_samples = 0U;
+  uint8_t uart_decimation = 0U;
+  uint32_t previous_tick;
 
   (void)thread_input;
   LevelLeds_Set(LEVEL_ALL_LEDS);
 
-  if (LevelSensor_Init() != BSP_ERROR_NONE)
+  if ((FusionSensors_Init() != BSP_ERROR_NONE) ||
+      (FusionEngine_Init() != BSP_ERROR_NONE))
   {
     LevelLeds_Set(0U);
     while (1)
@@ -310,12 +440,37 @@ VOID level_thread(ULONG thread_input)
     }
   }
 
+  previous_tick = HAL_GetTick();
+
   while (1)
   {
-    if (LevelSensor_Read(acceleration_mg) == BSP_ERROR_NONE)
+    uint32_t current_tick = HAL_GetTick();
+    uint32_t elapsed_ms = current_tick - previous_tick;
+    float delta_time_s = (elapsed_ms == 0U) ? FUSION_DEFAULT_DELTA_S
+                                            : (float)elapsed_ms * 0.001f;
+    previous_tick = current_tick;
+
+    if (delta_time_s < FUSION_MIN_DELTA_S)
     {
-      LevelUart_PrintAcceleration(acceleration_mg);
-      is_level = LevelDetector_Update(acceleration_mg, is_level);
+      delta_time_s = FUSION_MIN_DELTA_S;
+    }
+    else if (delta_time_s > FUSION_MAX_DELTA_S)
+    {
+      delta_time_s = FUSION_MAX_DELTA_S;
+    }
+
+    if (FusionSensors_Read(&fusion_input, current_tick) == BSP_ERROR_NONE)
+    {
+      FusionEngine_Run(&fusion_input, &fusion_output, delta_time_s);
+
+      uart_decimation++;
+      if (uart_decimation >= FUSION_UART_DECIMATION)
+      {
+        uart_decimation = 0U;
+        FusionUart_PrintQuaternion(&fusion_output);
+      }
+
+      is_level = LevelDetector_Update(fusion_output.gravity, is_level);
 
       if (is_level != 0U)
       {
@@ -331,7 +486,7 @@ VOID level_thread(ULONG thread_input)
       {
         level_animation_samples = 0U;
         level_animation_on = 1U;
-        LevelLeds_Set(LevelDirection_GetLed());
+        LevelLeds_Set(LevelDirection_GetLed(fusion_output.gravity));
       }
     }
     else
@@ -340,7 +495,7 @@ VOID level_thread(ULONG thread_input)
       HAL_GPIO_TogglePin(GPIOE, LEVEL_RED_LEDS);
     }
 
-    tx_thread_sleep(LEVEL_SAMPLE_TICKS);
+    tx_thread_sleep(FUSION_SAMPLE_TICKS);
   }
 }
 /* USER CODE END  0 */

@@ -596,7 +596,7 @@ __weak HAL_StatusTypeDef MX_SPI1_Init(SPI_HandleTypeDef* hspi)
   hspi->Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
   hspi->Init.CRCPolynomial = 7;
   hspi->Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
-  hspi->Init.NSSPMode = SPI_NSS_PULSE_ENABLE;
+  hspi->Init.NSSPMode = SPI_NSS_PULSE_DISABLE;
   if (HAL_SPI_Init(hspi) != HAL_OK)
   {
     ret = HAL_ERROR;

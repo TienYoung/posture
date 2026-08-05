@@ -43,7 +43,7 @@ extern "C" {
 #define TX_APP_MEM_POOL_SIZE                     9120
 
 /* USER CODE BEGIN EC */
-#define TX_APP_STACK_SIZE                        1024
+#define TX_APP_STACK_SIZE                        4096
 /* USER CODE END EC */
 
 /* Exported macro ------------------------------------------------------------*/
