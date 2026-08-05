@@ -47,7 +47,7 @@
 #define FUSION_SAMPLE_HZ             100U
 #define FUSION_SAMPLE_PERIOD_MS      (1000U / FUSION_SAMPLE_HZ)
 #define FUSION_SAMPLE_TICKS          (TX_TIMER_TICKS_PER_SECOND / FUSION_SAMPLE_HZ)
-#define FUSION_UART_DECIMATION       5U
+#define FUSION_UART_DECIMATION       1U
 #define FUSION_STATE_SIZE_BYTES      2432U
 #define FUSION_ACC_INSTANCE          CUSTOM_LSM303AGR_ACC_0
 #define FUSION_MAG_INSTANCE          CUSTOM_LSM303AGR_MAG_0
@@ -72,7 +72,6 @@
 #define FUSION_GBIAS_MAG_TH_SC       (2.0f * 0.001500f)
 
 #define LEVEL_ERROR_BLINK_TICKS      (TX_TIMER_TICKS_PER_SECOND / 5U)
-#define LEVEL_UART_TIMEOUT_MS        20U
 #define LEVEL_UART_BUFFER_SIZE       96U
 
 /* tan(3 degrees) ~= 0.052; tan(4 degrees) ~= 0.070. */
@@ -105,6 +104,8 @@ TX_THREAD thread_0;
 /* MotionFX contains double-word accesses, so its opaque state must be 8-byte aligned. */
 static uint64_t motionfx_state[(FUSION_STATE_SIZE_BYTES + sizeof(uint64_t) - 1U) / sizeof(uint64_t)];
 static MFX_MagCal_quality_t mag_cal_quality = MFX_MAGCALUNKNOWN;
+static uint8_t uart_dma_message[LEVEL_UART_BUFFER_SIZE];
+static uint32_t uart_sample_sequence;
 extern UART_HandleTypeDef huart1;
 /* USER CODE END PV */
 
@@ -318,12 +319,17 @@ static int32_t FusionFloatToMicro(float value)
 
 static void FusionUart_PrintQuaternion(const MFX_output_t *output)
 {
-  char message[LEVEL_UART_BUFFER_SIZE];
   int32_t scaled[MFX_QNUM_AXES];
   uint32_t absolute[MFX_QNUM_AXES];
   char sign[MFX_QNUM_AXES];
   int32_t length;
   uint32_t axis;
+  uint32_t sequence = uart_sample_sequence++;
+
+  if (HAL_UART_GetState(&huart1) != HAL_UART_STATE_READY)
+  {
+    return;
+  }
 
   for (axis = 0U; axis < MFX_QNUM_AXES; axis++)
   {
@@ -332,21 +338,22 @@ static void FusionUart_PrintQuaternion(const MFX_output_t *output)
     absolute[axis] = (scaled[axis] < 0) ? (uint32_t)(-scaled[axis]) : (uint32_t)scaled[axis];
   }
 
-  length = snprintf(message, sizeof(message),
-                    "Q,%c%lu.%06lu,%c%lu.%06lu,%c%lu.%06lu,%c%lu.%06lu,M,%u\r\n",
+  length = snprintf((char *)uart_dma_message, sizeof(uart_dma_message),
+                    "Q,%c%lu.%06lu,%c%lu.%06lu,%c%lu.%06lu,%c%lu.%06lu,M,%u,S,%lu,T,%lu\r\n",
                     sign[0], (unsigned long)(absolute[0] / 1000000U), (unsigned long)(absolute[0] % 1000000U),
                     sign[1], (unsigned long)(absolute[1] / 1000000U), (unsigned long)(absolute[1] % 1000000U),
                     sign[2], (unsigned long)(absolute[2] / 1000000U), (unsigned long)(absolute[2] % 1000000U),
                     sign[3], (unsigned long)(absolute[3] / 1000000U), (unsigned long)(absolute[3] % 1000000U),
-                    (unsigned int)mag_cal_quality);
+                    (unsigned int)mag_cal_quality,
+                    (unsigned long)sequence,
+                    (unsigned long)HAL_GetTick());
 
   if (length > 0)
   {
-    uint16_t transmit_length = (length < (int32_t)sizeof(message))
+    uint16_t transmit_length = (length < (int32_t)sizeof(uart_dma_message))
                                ? (uint16_t)length
-                               : (uint16_t)(sizeof(message) - 1U);
-    (void)HAL_UART_Transmit(&huart1, (const uint8_t *)message,
-                            transmit_length, LEVEL_UART_TIMEOUT_MS);
+                               : (uint16_t)(sizeof(uart_dma_message) - 1U);
+    (void)HAL_UART_Transmit_DMA(&huart1, uart_dma_message, transmit_length);
   }
 }
 
