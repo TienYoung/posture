@@ -32,6 +32,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "custom_motion_sensors.h"
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -47,6 +48,8 @@
 #define LEVEL_SENSOR_FUNCTION        MOTION_ACCELERO
 #define LEVEL_SENSOR_ODR_HZ          100.0f
 #define LEVEL_SENSOR_FULL_SCALE_G    2
+#define LEVEL_UART_TIMEOUT_MS        20U
+#define LEVEL_UART_BUFFER_SIZE       64U
 
 /* tan(3 degrees) ~= 0.052; tan(4 degrees) ~= 0.070. */
 #define LEVEL_ENTER_RATIO_PER_1000   52L
@@ -77,12 +80,14 @@ static TX_BYTE_POOL tx_app_byte_pool;
 TX_THREAD thread_0;
 static int32_t filtered_acc_mg[3];
 static uint8_t filter_initialized;
+extern UART_HandleTypeDef huart1;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN PFP */
 static int32_t LevelSensor_Init(void);
 static int32_t LevelSensor_Read(int32_t acceleration_mg[3]);
+static void LevelUart_PrintAcceleration(const int32_t acceleration_mg[3]);
 static void LevelLeds_Set(uint16_t leds);
 static uint8_t LevelDetector_Update(const int32_t acceleration_mg[3], uint8_t was_level);
 static uint16_t LevelDirection_GetLed(void);
@@ -192,6 +197,27 @@ static int32_t LevelSensor_Read(int32_t acceleration_mg[3])
   return BSP_ERROR_NONE;
 }
 
+static void LevelUart_PrintAcceleration(const int32_t acceleration_mg[3])
+{
+  char message[LEVEL_UART_BUFFER_SIZE];
+  int32_t length;
+
+  length = snprintf(message, sizeof(message),
+                    "ACC X=%ld Y=%ld Z=%ld mg\r\n",
+                    (long)acceleration_mg[0],
+                    (long)acceleration_mg[1],
+                    (long)acceleration_mg[2]);
+
+  if (length > 0)
+  {
+    uint16_t transmit_length = (length < (int32_t)sizeof(message))
+                               ? (uint16_t)length
+                               : (uint16_t)(sizeof(message) - 1U);
+    (void)HAL_UART_Transmit(&huart1, (const uint8_t *)message,
+                            transmit_length, LEVEL_UART_TIMEOUT_MS);
+  }
+}
+
 static void LevelLeds_Set(uint16_t leds)
 {
   HAL_GPIO_WritePin(GPIOE, LEVEL_ALL_LEDS, GPIO_PIN_RESET);
@@ -288,6 +314,7 @@ VOID level_thread(ULONG thread_input)
   {
     if (LevelSensor_Read(acceleration_mg) == BSP_ERROR_NONE)
     {
+      LevelUart_PrintAcceleration(acceleration_mg);
       is_level = LevelDetector_Update(acceleration_mg, is_level);
 
       if (is_level != 0U)

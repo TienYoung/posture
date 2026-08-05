@@ -24,6 +24,7 @@
 /* Defines ------------------------------------------------------------------*/
 /* STMicroelectronics.X-CUBE-MEMS1.13.0.0 */
 #define BSP_MOTION_SENSORS
+#define A3G4250D_GYR_SPI
 #define LSM303AGR_ACCMAG_I2C
 
 #endif /* __RTE_COMPONENTS_H__ */

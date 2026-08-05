@@ -85,6 +85,19 @@ int32_t CUSTOM_MOTION_SENSOR_Read_Register(uint32_t Instance, uint8_t Reg, uint8
       break;
 #endif /* USE_CUSTOM_MOTION_SENSOR_LSM303AGR_MAG_0 */
 
+#if (USE_CUSTOM_MOTION_SENSOR_A3G4250D_0 == 1)
+    case CUSTOM_A3G4250D_0:
+      if (A3G4250D_Read_Reg(MotionCompObj[Instance], Reg, Data) != BSP_ERROR_NONE)
+      {
+        ret = BSP_ERROR_COMPONENT_FAILURE;
+      }
+      else
+      {
+        ret = BSP_ERROR_NONE;
+      }
+      break;
+#endif /* USE_CUSTOM_MOTION_SENSOR_A3G4250D_0 */
+
     default:
       ret = BSP_ERROR_WRONG_PARAM;
       break;
@@ -132,6 +145,19 @@ int32_t CUSTOM_MOTION_SENSOR_Write_Register(uint32_t Instance, uint8_t Reg, uint
       }
       break;
 #endif /* USE_CUSTOM_MOTION_SENSOR_LSM303AGR_MAG_0 */
+
+#if (USE_CUSTOM_MOTION_SENSOR_A3G4250D_0 == 1)
+    case CUSTOM_A3G4250D_0:
+      if (A3G4250D_Write_Reg(MotionCompObj[Instance], Reg, Data) != BSP_ERROR_NONE)
+      {
+        ret = BSP_ERROR_COMPONENT_FAILURE;
+      }
+      else
+      {
+        ret = BSP_ERROR_NONE;
+      }
+      break;
+#endif /* USE_CUSTOM_MOTION_SENSOR_A3G4250D_0 */
 
     default:
       ret = BSP_ERROR_WRONG_PARAM;
@@ -197,6 +223,26 @@ int32_t CUSTOM_MOTION_SENSOR_Get_DRDY_Status(uint32_t Instance, uint32_t Functio
       }
       break;
 #endif /* USE_CUSTOM_MOTION_SENSOR_LSM303AGR_MAG_0 */
+
+#if (USE_CUSTOM_MOTION_SENSOR_A3G4250D_0 == 1)
+    case CUSTOM_A3G4250D_0:
+      if ((Function & MOTION_GYRO) == MOTION_GYRO)
+      {
+        if (A3G4250D_GYRO_Get_DRDY_Status(MotionCompObj[Instance], Status) != BSP_ERROR_NONE)
+        {
+          ret = BSP_ERROR_COMPONENT_FAILURE;
+        }
+        else
+        {
+          ret = BSP_ERROR_NONE;
+        }
+      }
+      else
+      {
+        ret = BSP_ERROR_COMPONENT_FAILURE;
+      }
+      break;
+#endif /* USE_CUSTOM_MOTION_SENSOR_A3G4250D_0 */
 
     default:
       ret = BSP_ERROR_WRONG_PARAM;

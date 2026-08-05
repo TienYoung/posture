@@ -69,6 +69,16 @@ static int32_t LSM303AGR_ACC_0_Probe(uint32_t Functions);
 #if (USE_CUSTOM_MOTION_SENSOR_LSM303AGR_MAG_0 == 1)
 static int32_t LSM303AGR_MAG_0_Probe(uint32_t Functions);
 #endif /* USE_CUSTOM_MOTION_SENSOR_LSM303AGR_MAG_0 */
+#if (USE_CUSTOM_MOTION_SENSOR_A3G4250D_0 == 1)
+static int32_t A3G4250D_0_Probe(uint32_t Functions);
+#endif /* USE_CUSTOM_MOTION_SENSOR_A3G4250D_0 */
+
+#if (USE_CUSTOM_MOTION_SENSOR_A3G4250D_0 == 1)
+static int32_t CUSTOM_A3G4250D_0_Init(void);
+static int32_t CUSTOM_A3G4250D_0_DeInit(void);
+static int32_t CUSTOM_A3G4250D_0_WriteReg(uint16_t Addr, uint16_t Reg, uint8_t *pdata, uint16_t len);
+static int32_t CUSTOM_A3G4250D_0_ReadReg(uint16_t Addr, uint16_t Reg, uint8_t *pdata, uint16_t len);
+#endif /* USE_CUSTOM_MOTION_SENSOR_A3G4250D_0 */
 
 /**
   * @}
@@ -145,6 +155,30 @@ int32_t CUSTOM_MOTION_SENSOR_Init(uint32_t Instance, uint32_t Functions)
       }
       break;
 #endif /* USE_CUSTOM_MOTION_SENSOR_LSM303AGR_MAG_0 */
+#if (USE_CUSTOM_MOTION_SENSOR_A3G4250D_0 == 1)
+    case CUSTOM_A3G4250D_0:
+      if (A3G4250D_0_Probe(Functions) != BSP_ERROR_NONE)
+      {
+        return BSP_ERROR_NO_INIT;
+      }
+      if (MotionDrv[Instance]->GetCapabilities(MotionCompObj[Instance], (void *)&cap) != BSP_ERROR_NONE)
+      {
+        return BSP_ERROR_UNKNOWN_COMPONENT;
+      }
+      if (cap.Acc == 1U)
+      {
+        component_functions |= MOTION_ACCELERO;
+      }
+      if (cap.Gyro == 1U)
+      {
+        component_functions |= MOTION_GYRO;
+      }
+      if (cap.Magneto == 1U)
+      {
+        component_functions |= MOTION_MAGNETO;
+      }
+      break;
+#endif /* USE_CUSTOM_MOTION_SENSOR_A3G4250D_0 */
     default:
       ret = BSP_ERROR_WRONG_PARAM;
       break;
@@ -769,6 +803,181 @@ static int32_t LSM303AGR_MAG_0_Probe(uint32_t Functions)
   return ret;
 }
 #endif /* USE_CUSTOM_MOTION_SENSOR_LSM303AGR_MAG_0 */
+
+#if (USE_CUSTOM_MOTION_SENSOR_A3G4250D_0 == 1)
+/**
+  * @brief  Register Bus IOs for A3G4250D instance
+  * @param  Functions Motion sensor functions. Could be :
+  *         - MOTION_GYRO
+  * @retval BSP status
+  */
+static int32_t A3G4250D_0_Probe(uint32_t Functions)
+{
+  A3G4250D_IO_t            io_ctx;
+  uint8_t                  id;
+  static A3G4250D_Object_t a3g4250d_obj_0;
+  A3G4250D_Capabilities_t  cap;
+  int32_t                  ret = BSP_ERROR_NONE;
+
+  /* Configure the driver */
+  io_ctx.BusType     = A3G4250D_SPI_4WIRES_BUS; /* SPI 4-Wires */
+  io_ctx.Address     = 0x0;
+  io_ctx.Init        = CUSTOM_A3G4250D_0_Init;
+  io_ctx.DeInit      = CUSTOM_A3G4250D_0_DeInit;
+  io_ctx.ReadReg     = CUSTOM_A3G4250D_0_ReadReg;
+  io_ctx.WriteReg    = CUSTOM_A3G4250D_0_WriteReg;
+  io_ctx.GetTick     = BSP_GetTick;
+  io_ctx.Delay       = HAL_Delay;
+
+  if (A3G4250D_RegisterBusIO(&a3g4250d_obj_0, &io_ctx) != A3G4250D_OK)
+  {
+    ret = BSP_ERROR_UNKNOWN_COMPONENT;
+  }
+  else if (A3G4250D_ReadID(&a3g4250d_obj_0, &id) != A3G4250D_OK)
+  {
+    ret = BSP_ERROR_UNKNOWN_COMPONENT;
+  }
+  else if (id != (uint8_t)A3G4250D_ID)
+  {
+    ret = BSP_ERROR_UNKNOWN_COMPONENT;
+  }
+  else
+  {
+    (void)A3G4250D_GetCapabilities(&a3g4250d_obj_0, &cap);
+    MotionCtx[CUSTOM_A3G4250D_0].Functions = ((uint32_t)cap.Gyro) | ((uint32_t)cap.Acc << 1) | ((uint32_t)cap.Magneto << 2);
+
+    MotionCompObj[CUSTOM_A3G4250D_0] = &a3g4250d_obj_0;
+    /* The second cast (void *) is added to bypass Misra R11.3 rule */
+    MotionDrv[CUSTOM_A3G4250D_0] = (MOTION_SENSOR_CommonDrv_t *)(void *)&A3G4250D_COMMON_Driver;
+
+    if ((ret == BSP_ERROR_NONE) && ((Functions & MOTION_GYRO) == MOTION_GYRO) && (cap.Gyro == 1U))
+    {
+      /* The second cast (void *) is added to bypass Misra R11.3 rule */
+      MotionFuncDrv[CUSTOM_A3G4250D_0][FunctionIndex[MOTION_GYRO]] = (MOTION_SENSOR_FuncDrv_t *)(
+                                                                      void *)&A3G4250D_GYRO_Driver;
+
+      if (MotionDrv[CUSTOM_A3G4250D_0]->Init(MotionCompObj[CUSTOM_A3G4250D_0]) != A3G4250D_OK)
+      {
+        ret = BSP_ERROR_COMPONENT_FAILURE;
+      }
+      else
+      {
+        ret = BSP_ERROR_NONE;
+      }
+    }
+    if ((ret == BSP_ERROR_NONE) && ((Functions & MOTION_ACCELERO) == MOTION_ACCELERO))
+    {
+      /* Return an error if the application try to initialize a function not supported by the component */
+      ret = BSP_ERROR_COMPONENT_FAILURE;
+    }
+    if ((ret == BSP_ERROR_NONE) && ((Functions & MOTION_MAGNETO) == MOTION_MAGNETO))
+    {
+      /* Return an error if the application try to initialize a function not supported by the component */
+      ret = BSP_ERROR_COMPONENT_FAILURE;
+    }
+  }
+
+  return ret;
+}
+
+/**
+  * @brief  Initialize SPI bus for A3G4250D
+  * @retval BSP status
+  */
+static int32_t CUSTOM_A3G4250D_0_Init(void)
+{
+  int32_t ret = BSP_ERROR_UNKNOWN_FAILURE;
+
+  if(CUSTOM_A3G4250D_0_SPI_Init() == BSP_ERROR_NONE)
+  {
+    ret = BSP_ERROR_NONE;
+  }
+
+  return ret;
+}
+
+/**
+  * @brief  DeInitialize SPI bus for A3G4250D
+  * @retval BSP status
+  */
+static int32_t CUSTOM_A3G4250D_0_DeInit(void)
+{
+  int32_t ret = BSP_ERROR_UNKNOWN_FAILURE;
+
+  if(CUSTOM_A3G4250D_0_SPI_DeInit() == BSP_ERROR_NONE)
+  {
+    ret = BSP_ERROR_NONE;
+  }
+
+  return ret;
+}
+
+/**
+  * @brief  Write register by SPI bus for A3G4250D
+  * @param  Addr not used, it is only for BSP compatibility
+  * @param  Reg the starting register address to be written
+  * @param  pdata the pointer to the data to be written
+  * @param  len the length of the data to be written
+  * @retval BSP status
+  */
+static int32_t CUSTOM_A3G4250D_0_WriteReg(uint16_t Addr, uint16_t Reg, uint8_t *pdata, uint16_t len)
+{
+  int32_t ret = BSP_ERROR_NONE;
+  uint8_t dataReg = (uint8_t)Reg;
+
+  /* CS Enable */
+  HAL_GPIO_WritePin(CUSTOM_A3G4250D_0_CS_PORT, CUSTOM_A3G4250D_0_CS_PIN, GPIO_PIN_RESET);
+
+  if (CUSTOM_A3G4250D_0_SPI_Send(&dataReg, 1) != BSP_ERROR_NONE)
+  {
+    ret = BSP_ERROR_UNKNOWN_FAILURE;
+  }
+
+  if (CUSTOM_A3G4250D_0_SPI_Send(pdata, len) != BSP_ERROR_NONE)
+  {
+    ret = BSP_ERROR_UNKNOWN_FAILURE;
+  }
+
+  /* CS Disable */
+  HAL_GPIO_WritePin(CUSTOM_A3G4250D_0_CS_PORT, CUSTOM_A3G4250D_0_CS_PIN, GPIO_PIN_SET);
+
+  return ret;
+}
+
+/**
+  * @brief  Read register by SPI bus for A3G4250D
+  * @param  Addr not used, it is only for BSP compatibility
+  * @param  Reg the starting register address to be read
+  * @param  pdata the pointer to the data to be read
+  * @param  len the length of the data to be read
+  * @retval BSP status
+  */
+static int32_t CUSTOM_A3G4250D_0_ReadReg(uint16_t Addr, uint16_t Reg, uint8_t *pdata, uint16_t len)
+{
+  int32_t ret = BSP_ERROR_NONE;
+  uint8_t dataReg = (uint8_t)Reg;
+
+  dataReg |= 0x80;
+
+  /* CS Enable */
+  HAL_GPIO_WritePin(CUSTOM_A3G4250D_0_CS_PORT, CUSTOM_A3G4250D_0_CS_PIN, GPIO_PIN_RESET);
+
+  if (CUSTOM_A3G4250D_0_SPI_Send(&dataReg, 1) != BSP_ERROR_NONE)
+  {
+    ret = BSP_ERROR_UNKNOWN_FAILURE;
+  }
+
+  if (CUSTOM_A3G4250D_0_SPI_Recv(pdata, len) != BSP_ERROR_NONE)
+  {
+    ret = BSP_ERROR_UNKNOWN_FAILURE;
+  }
+
+  /* CS Disable */
+  HAL_GPIO_WritePin(CUSTOM_A3G4250D_0_CS_PORT, CUSTOM_A3G4250D_0_CS_PIN, GPIO_PIN_SET);
+
+  return ret;
+}
+#endif /* USE_CUSTOM_MOTION_SENSOR_A3G4250D_0 */
 
 /**
   * @}
