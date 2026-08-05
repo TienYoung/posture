@@ -32,6 +32,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "custom_motion_sensors.h"
+#include "custom_motion_sensors_ex.h"
 #include <stddef.h>
 #include "motion_fx.h"
 #include <stdio.h>
@@ -47,6 +48,8 @@
 #define FUSION_SAMPLE_HZ             100U
 #define FUSION_SAMPLE_PERIOD_MS      (1000U / FUSION_SAMPLE_HZ)
 #define FUSION_SAMPLE_TICKS          (TX_TIMER_TICKS_PER_SECOND / FUSION_SAMPLE_HZ)
+#define FUSION_DRDY_TIMEOUT_TICKS    (TX_TIMER_TICKS_PER_SECOND / 2U)
+#define FUSION_EVENT_GYRO_DRDY       (1UL << 0)
 #define FUSION_UART_DECIMATION       1U
 #define FUSION_STATE_SIZE_BYTES      2432U
 #define FUSION_ACC_INSTANCE          CUSTOM_LSM303AGR_ACC_0
@@ -72,7 +75,7 @@
 #define FUSION_GBIAS_MAG_TH_SC       (2.0f * 0.001500f)
 
 #define LEVEL_ERROR_BLINK_TICKS      (TX_TIMER_TICKS_PER_SECOND / 5U)
-#define LEVEL_UART_BUFFER_SIZE       96U
+#define LEVEL_UART_BUFFER_SIZE       128U
 
 /* tan(3 degrees) ~= 0.052; tan(4 degrees) ~= 0.070. */
 #define LEVEL_ENTER_RATIO_PER_1000   52L
@@ -101,21 +104,25 @@ static TX_BYTE_POOL tx_app_byte_pool;
 
 /* USER CODE BEGIN PV */
 TX_THREAD thread_0;
+static TX_EVENT_FLAGS_GROUP fusion_events;
 /* MotionFX contains double-word accesses, so its opaque state must be 8-byte aligned. */
 static uint64_t motionfx_state[(FUSION_STATE_SIZE_BYTES + sizeof(uint64_t) - 1U) / sizeof(uint64_t)];
 static MFX_MagCal_quality_t mag_cal_quality = MFX_MAGCALUNKNOWN;
 static uint8_t uart_dma_message[LEVEL_UART_BUFFER_SIZE];
 static uint32_t uart_sample_sequence;
+static volatile uint32_t gyro_drdy_irq_count;
+static volatile uint8_t fusion_events_ready;
 extern UART_HandleTypeDef huart1;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN PFP */
 static int32_t FusionSensors_Init(void);
+static int32_t FusionGyroDataReady_Enable(void);
 static int32_t FusionSensors_Read(MFX_input_t *input, uint32_t timestamp_ms);
 static int32_t FusionEngine_Init(void);
 static void FusionEngine_Run(MFX_input_t *input, MFX_output_t *output, float delta_time_s);
-static void FusionUart_PrintQuaternion(const MFX_output_t *output);
+static void FusionUart_PrintQuaternion(const MFX_output_t *output, uint32_t drdy_irq_count);
 static int32_t FusionFloatToMicro(float value);
 static void LevelLeds_Set(uint16_t leds);
 static uint8_t LevelDetector_Update(const float gravity[3], uint8_t was_level);
@@ -161,7 +168,12 @@ VOID tx_application_define(VOID *first_unused_memory)
     }
 
     /* USER CODE BEGIN  App_ThreadX_Init_Success */
-    UINT result = tx_byte_allocate(&tx_app_byte_pool, (VOID **) &thread_ptr, TX_APP_STACK_SIZE, TX_NO_WAIT);
+    UINT result = tx_event_flags_create(&fusion_events, "fusion events");
+    if (result == TX_SUCCESS)
+    {
+      fusion_events_ready = 1U;
+      result = tx_byte_allocate(&tx_app_byte_pool, (VOID **) &thread_ptr, TX_APP_STACK_SIZE, TX_NO_WAIT);
+    }
     if(result == TX_SUCCESS)
     {
       result = tx_thread_create(&thread_0, "level detector", level_thread, 0, thread_ptr, TX_APP_STACK_SIZE, 1, 1, TX_NO_TIME_SLICE, TX_AUTO_START);
@@ -206,6 +218,28 @@ static int32_t FusionSensors_Init(void)
   }
 
   tx_thread_sleep(FUSION_SAMPLE_TICKS);
+  return BSP_ERROR_NONE;
+}
+
+static int32_t FusionGyroDataReady_Enable(void)
+{
+  a3g4250d_ctrl_reg3_t interrupt_route = {0};
+
+  if (CUSTOM_MOTION_SENSOR_Read_Register(FUSION_GYRO_INSTANCE, A3G4250D_CTRL_REG3,
+                                         (uint8_t *)&interrupt_route) != BSP_ERROR_NONE)
+  {
+    return BSP_ERROR_COMPONENT_FAILURE;
+  }
+
+  interrupt_route.i2_drdy = 1U;
+  __HAL_GPIO_EXTI_CLEAR_IT(MEMS_INT2_Pin);
+
+  if (CUSTOM_MOTION_SENSOR_Write_Register(FUSION_GYRO_INSTANCE, A3G4250D_CTRL_REG3,
+                                          *((uint8_t *)&interrupt_route)) != BSP_ERROR_NONE)
+  {
+    return BSP_ERROR_COMPONENT_FAILURE;
+  }
+
   return BSP_ERROR_NONE;
 }
 
@@ -317,7 +351,7 @@ static int32_t FusionFloatToMicro(float value)
   return (int32_t)(value * 1000000.0f);
 }
 
-static void FusionUart_PrintQuaternion(const MFX_output_t *output)
+static void FusionUart_PrintQuaternion(const MFX_output_t *output, uint32_t drdy_irq_count)
 {
   int32_t scaled[MFX_QNUM_AXES];
   uint32_t absolute[MFX_QNUM_AXES];
@@ -339,14 +373,15 @@ static void FusionUart_PrintQuaternion(const MFX_output_t *output)
   }
 
   length = snprintf((char *)uart_dma_message, sizeof(uart_dma_message),
-                    "Q,%c%lu.%06lu,%c%lu.%06lu,%c%lu.%06lu,%c%lu.%06lu,M,%u,S,%lu,T,%lu\r\n",
+                    "Q,%c%lu.%06lu,%c%lu.%06lu,%c%lu.%06lu,%c%lu.%06lu,M,%u,S,%lu,T,%lu,I,%lu\r\n",
                     sign[0], (unsigned long)(absolute[0] / 1000000U), (unsigned long)(absolute[0] % 1000000U),
                     sign[1], (unsigned long)(absolute[1] / 1000000U), (unsigned long)(absolute[1] % 1000000U),
                     sign[2], (unsigned long)(absolute[2] / 1000000U), (unsigned long)(absolute[2] % 1000000U),
                     sign[3], (unsigned long)(absolute[3] / 1000000U), (unsigned long)(absolute[3] % 1000000U),
                     (unsigned int)mag_cal_quality,
                     (unsigned long)sequence,
-                    (unsigned long)HAL_GetTick());
+                    (unsigned long)HAL_GetTick(),
+                    (unsigned long)drdy_irq_count);
 
   if (length > 0)
   {
@@ -423,6 +458,18 @@ char MotionFX_SaveMagCalInNVM(unsigned short int data_size, unsigned int *data)
   return (char)1;
 }
 
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == MEMS_INT2_Pin)
+  {
+    gyro_drdy_irq_count++;
+    if (fusion_events_ready != 0U)
+    {
+      (void)tx_event_flags_set(&fusion_events, FUSION_EVENT_GYRO_DRDY, TX_OR);
+    }
+  }
+}
+
 VOID level_thread(ULONG thread_input)
 {
   MFX_input_t fusion_input = {0};
@@ -437,7 +484,8 @@ VOID level_thread(ULONG thread_input)
   LevelLeds_Set(LEVEL_ALL_LEDS);
 
   if ((FusionSensors_Init() != BSP_ERROR_NONE) ||
-      (FusionEngine_Init() != BSP_ERROR_NONE))
+      (FusionEngine_Init() != BSP_ERROR_NONE) ||
+      (FusionGyroDataReady_Enable() != BSP_ERROR_NONE))
   {
     LevelLeds_Set(0U);
     while (1)
@@ -451,6 +499,19 @@ VOID level_thread(ULONG thread_input)
 
   while (1)
   {
+    ULONG actual_events;
+    UINT event_status = tx_event_flags_get(&fusion_events, FUSION_EVENT_GYRO_DRDY,
+                                           TX_OR_CLEAR, &actual_events,
+                                           FUSION_DRDY_TIMEOUT_TICKS);
+
+    if (event_status != TX_SUCCESS)
+    {
+      HAL_GPIO_WritePin(GPIOE, LEVEL_NON_RED_LEDS, GPIO_PIN_RESET);
+      HAL_GPIO_TogglePin(GPIOE, LEVEL_RED_LEDS);
+      continue;
+    }
+
+    uint32_t drdy_irq_snapshot = gyro_drdy_irq_count;
     uint32_t current_tick = HAL_GetTick();
     uint32_t elapsed_ms = current_tick - previous_tick;
     float delta_time_s = (elapsed_ms == 0U) ? FUSION_DEFAULT_DELTA_S
@@ -474,7 +535,7 @@ VOID level_thread(ULONG thread_input)
       if (uart_decimation >= FUSION_UART_DECIMATION)
       {
         uart_decimation = 0U;
-        FusionUart_PrintQuaternion(&fusion_output);
+        FusionUart_PrintQuaternion(&fusion_output, drdy_irq_snapshot);
       }
 
       is_level = LevelDetector_Update(fusion_output.gravity, is_level);
@@ -502,7 +563,6 @@ VOID level_thread(ULONG thread_input)
       HAL_GPIO_TogglePin(GPIOE, LEVEL_RED_LEDS);
     }
 
-    tx_thread_sleep(FUSION_SAMPLE_TICKS);
   }
 }
 /* USER CODE END  0 */

@@ -115,6 +115,7 @@ void Error_Handler(void);
 #define MEMS_INT1_GPIO_Port GPIOE
 #define MEMS_INT2_Pin GPIO_PIN_1
 #define MEMS_INT2_GPIO_Port GPIOE
+#define MEMS_INT2_EXTI_IRQn EXTI1_IRQn
 
 /* USER CODE BEGIN Private defines */
 
